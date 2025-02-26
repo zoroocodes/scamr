@@ -1,13 +1,16 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import EmojiPicker from 'emoji-picker-react';
-import { Thread, TopThread } from '@/types';
+import { useParams } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import io, { Socket } from 'socket.io-client';
 
-let socket: Socket | undefined;
+// Dynamically import EmojiPicker to prevent SSR issues
+const EmojiPicker = dynamic(() => import('emoji-picker-react'), { 
+  ssr: false 
+});
 
 // Utility function to extract URLs from text
 const extractUrls = (text: string): string[] => {
@@ -46,16 +49,28 @@ const renderTextWithLinksAndEmojis = (text: string) => {
   });
 };
 
-export default function HomePage() {
-  const [threads, setThreads] = useState<any[]>([]);
-  const [topThreads, setTopThreads] = useState<any[]>([]);
+// Safe date formatting to avoid hydration issues
+const formatDate = (timestamp: string | number | Date) => {
+  const date = new Date(timestamp);
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${
+    String(date.getUTCHours()).padStart(2, '0')
+  }:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+};
+
+let socket: Socket | undefined;
+
+export default function CAThread() {
+  const params = useParams();
+  const ca = decodeURIComponent(params.ca as string);
+  
+  const [posts, setPosts] = useState<any[]>([]);
   const [newPost, setNewPost] = useState({
-    ca: '',
+    ca: ca,
     message: '',
     twitter: '',
+    link: '',
     gif: '',
   });
-  const [searchTerm, setSearchTerm] = useState('');
   const [gifSearch, setGifSearch] = useState('');
   const [gifs, setGifs] = useState<string[]>([]);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -65,41 +80,45 @@ export default function HomePage() {
       socket = io();
 
       socket.on('connect', () => {
-        console.log('Connected to socket');
+        console.log('Connected to socket in thread page');
       });
 
       socket.on('newPost', (post: any) => {
-        setThreads(prevThreads => [post, ...prevThreads]);
+        if (post.ca === ca) {
+          setPosts(prevPosts => {
+            // Prevent duplicates
+            const isExisting = prevPosts.some(p => 
+              p.id === post.id || 
+              (p.tempId && p.tempId === post.tempId)
+            );
+            
+            if (isExisting) return prevPosts;
+            return [post, ...prevPosts];
+          });
+        }
       });
     };
 
     socketInitializer();
+
+    // Fetch initial posts
+    const fetchPosts = async () => {
+      try {
+        const response = await fetch(`/api/ca-posts?ca=${encodeURIComponent(ca)}`);
+        const data = await response.json();
+        setPosts(data);
+      } catch (error) {
+        console.error('Error fetching posts:', error);
+      }
+    };
+    fetchPosts();
 
     return () => {
       if (socket) {
         socket.disconnect();
       }
     };
-  }, []);
-
-  // Fetch threads and top threads
-  const fetchThreads = useCallback(async () => {
-    try {
-      // Fetch recent threads with optional search
-      const threadsResponse = await fetch(`/api/ca-posts${searchTerm ? `?search=${searchTerm}` : ''}`);
-      const threadsData = await threadsResponse.json();
-      setThreads(Array.isArray(threadsData) ? threadsData : []);
-
-      // Fetch top threads
-      const topResponse = await fetch('/api/threads/top');
-      const topData = await topResponse.json();
-      setTopThreads(Array.isArray(topData) ? topData : []);
-    } catch (error) {
-      console.error('Error fetching threads:', error);
-      setThreads([]);
-      setTopThreads([]);
-    }
-  }, [searchTerm]);
+  }, [ca]);
 
   // Tenor API GIF search
   const searchGifs = async () => {
@@ -132,14 +151,21 @@ export default function HomePage() {
   };
 
   // Submit post handler
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       const extractedLinks = extractUrls(newPost.message);
+      const links = newPost.link 
+        ? [...extractedLinks, newPost.link] 
+        : extractedLinks;
+
+      // Generate a temporary ID to prevent duplicates
+      const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
       const postData = {
         ...newPost,
-        link: extractedLinks.length > 0 ? extractedLinks[0] : null,
+        tempId, // Add temporary ID
+        link: links.length > 0 ? links[0] : null,
       };
 
       const response = await fetch('/api/ca-posts', {
@@ -158,16 +184,24 @@ export default function HomePage() {
       
       // Emit the new post through socket
       if (socket) {
-        socket.emit('newPost', data);
+        socket.emit('newPost', { ...data, tempId });
       } else {
         console.error('Socket is not initialized');
       }
 
+      // Optimistically add the post to the list
+      setPosts(prevPosts => {
+        const isExisting = prevPosts.some(p => p.id === data.id);
+        if (isExisting) return prevPosts;
+        return [data, ...prevPosts];
+      });
+
       // Reset form
       setNewPost({
-        ca: '',
+        ca: ca,
         message: '',
         twitter: '',
+        link: '',
         gif: '',
       });
       setGifs([]);
@@ -176,49 +210,37 @@ export default function HomePage() {
       console.error('Error creating post:', error);
       alert('Failed to post message: ' + (error instanceof Error ? error.message : String(error)));
     }
-  }, [newPost]);
-
-  // Fetch threads on component mount and when search term changes
-  useEffect(() => {
-    fetchThreads();
-  }, [fetchThreads]);
+  };
 
   return (
     <div className="min-h-screen bg-[#1A1A1B] text-[#c5c8c9] font-mono">
-      {/* Top Bar */}
-      <div className="bg-[#262627] p-4 border-b border-[#343536] text-center">
-        <h1 className="text-xl font-bold text-[#c5c8c9]">Crypto Threads</h1>
+      {/* Header with Back Button */}
+      <div className="bg-[#262627] p-2 border-b border-[#343536] flex items-center">
+        <Link 
+          href="/" 
+          className="mr-4 text-[#c5c8c9] hover:text-white"
+        >
+          ← Back
+        </Link>
+        <h1 className="text-xl font-bold">CA Thread: {ca}</h1>
       </div>
 
-      {/* Main Content */}
+      {/* Post Form */}
       <div className="max-w-3xl mx-auto mt-4 p-2">
-        {/* Search Box */}
-        <div className="fixed bottom-0 left-0 right-0 bg-[#262627] p-2 border-t border-[#343536]">
-          <input
-            type="text"
-            placeholder="Search contract addresses or messages..."
-            className="w-full max-w-3xl mx-auto block p-2 bg-[#1A1A1B] border border-[#343536] text-[#c5c8c9] focus:outline-none focus:border-[#545456]"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-        </div>
-
-        {/* Post Form */}
         <form onSubmit={handleSubmit} className="bg-[#262627] p-4 mb-4 border border-[#343536]">
-          <input
-            type="text"
-            placeholder="Contract Address"
-            className="w-full mb-2 p-2 bg-[#1A1A1B] border border-[#343536] text-[#c5c8c9] focus:outline-none focus:border-[#545456]"
-            value={newPost.ca}
-            onChange={(e) => setNewPost({...newPost, ca: e.target.value})}
-            required
-          />
           <input
             type="text"
             placeholder="Twitter (optional)"
             className="w-full mb-2 p-2 bg-[#1A1A1B] border border-[#343536] text-[#c5c8c9] focus:outline-none focus:border-[#545456]"
             value={newPost.twitter}
             onChange={(e) => setNewPost({...newPost, twitter: e.target.value})}
+          />
+          <input
+            type="text"
+            placeholder="Manual Link (optional)"
+            className="w-full mb-2 p-2 bg-[#1A1A1B] border border-[#343536] text-[#c5c8c9] focus:outline-none focus:border-[#545456]"
+            value={newPost.link}
+            onChange={(e) => setNewPost({...newPost, link: e.target.value})}
           />
           
           {/* GIF Search */}
@@ -244,7 +266,7 @@ export default function HomePage() {
             <div className="flex overflow-x-auto space-x-2 mb-2 pb-2">
               {gifs.map((gif, index) => (
                 <Image 
-                  key={`${gif}-${index}`}
+                  key={`${gif}-${index}`} 
                   src={gif} 
                   alt={`GIF ${index}`}
                   width={100}
@@ -293,102 +315,42 @@ export default function HomePage() {
           </button>
         </form>
 
-        {/* Top Threads Section */}
-        <div className="bg-[#262627] border border-[#343536] mb-4">
-          <div className="bg-[#1d1d1e] p-2 border-b border-[#343536] flex justify-between items-center">
-            <h2 className="text-sm font-semibold text-[#737577] uppercase tracking-wider">
-              Top Threads
-            </h2>
-            <Link 
-              href="/all-threads" 
-              className="text-xs text-[#737577] hover:text-white transition-colors"
+        {/* Posts */}
+        <div className="space-y-4">
+          {posts.map((post, index) => (
+            <div 
+              key={`${post.id || post.tempId || 'unknown'}-${index}`} 
+              className="bg-[#262627] p-4 border border-[#343536]"
             >
-              View All
-            </Link>
-          </div>
-          <div className="p-2 space-y-2">
-            {topThreads.map((thread) => (
-              <Link 
-                key={`${thread.ca}-${thread.postCount}`}
-                href={`/ca/${encodeURIComponent(thread.ca)}`}
-                className="block hover:bg-[#1A1A1B] p-2 rounded transition-colors"
-              >
-                <div className="flex justify-between items-center">
-                  <div>
-                    <span className="text-xs text-[#789922] truncate block">
-                      {thread.ca}
-                    </span>
-                    <span className="text-[#737577] text-xs">
-                      {thread.postCount} posts
-                    </span>
-                  </div>
-                  <svg 
-                    xmlns="http://www.w3.org/2000/svg" 
-                    className="h-4 w-4 text-[#737577]" 
-                    fill="none" 
-                    viewBox="0 0 24 24" 
-                    stroke="currentColor"
+              <div className="text-[#737577] text-sm mb-2">
+                {formatDate(post.timestamp)} No.{post.id || index}
+                {post.twitter && (
+                  <span className="ml-2 text-[#8A2BE2]">@{post.twitter}</span>
+                )}
+                {post.link && (
+                  <a 
+                    href={post.link} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="ml-2 text-blue-500 hover:underline"
                   >
-                    <path 
-                      strokeLinecap="round" 
-                      strokeLinejoin="round" 
-                      strokeWidth={2} 
-                      d="M14 5l7 7m0 0l-7 7m7-7H3" 
-                    />
-                  </svg>
-                </div>
-              </Link>
-            ))}
-          </div>
-        </div>
-
-        {/* Threads */}
-        <div className="space-y-8 mb-16">
-          {Array.isArray(threads) && threads.map((thread) => (
-            <div key={`${thread.id}-${thread.ca}-${thread.timestamp}`} className="bg-[#262627] border border-[#343536]">
-              <div className="bg-[#1d1d1e] p-2 border-b border-[#343536]">
-                <span className="text-[#789922] font-bold">&gt;{thread.ca}</span>
-                <Link 
-                  href={`/ca/${encodeURIComponent(thread.ca)}`}
-                  className="ml-2 text-[#737577] hover:underline"
-                >
-                  View Thread
-                </Link>
+                    Link
+                  </a>
+                )}
               </div>
-              
-              <div className="p-2 space-y-2">
-                <div className="p-2 border-b border-[#343536]">
-                  <div className="text-[#737577] text-sm mb-1">
-                    {new Date(thread.timestamp).toLocaleString()} No.{thread.id}
-                    {thread.twitter && (
-                      <span className="ml-2 text-[#8A2BE2]">@{thread.twitter}</span>
-                    )}
-                    {thread.link && (
-                      <a 
-                        href={thread.link} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="ml-2 text-blue-500 hover:underline"
-                      >
-                        Link
-                      </a>
-                    )}
-                  </div>
-                  <div className="whitespace-pre-wrap break-all">
-                    {renderTextWithLinksAndEmojis(thread.message)}
-                  </div>
-                  {thread.gif && (
-                    <Image 
-                      src={thread.gif} 
-                      alt="Post GIF" 
-                      width={500}
-                      height={300}
-                      unoptimized
-                      className="max-w-full h-auto mt-2"
-                    />
-                  )}
-                </div>
+              <div className="whitespace-pre-wrap break-all">
+                {renderTextWithLinksAndEmojis(post.message)}
               </div>
+              {post.gif && (
+                <Image 
+                  src={post.gif} 
+                  alt="Post GIF" 
+                  width={500}
+                  height={300}
+                  unoptimized
+                  className="max-w-full h-auto mt-2"
+                />
+              )}
             </div>
           ))}
         </div>

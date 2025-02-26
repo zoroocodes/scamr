@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "CAPost" ADD COLUMN     "gif" TEXT,
+ALTER COLUMN "link" SET DATA TYPE TEXT;

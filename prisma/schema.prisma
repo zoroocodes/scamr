@@ -1,0 +1,20 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model CAPost {
+  id        Int      @id @default(autoincrement())
+  ca        String   @db.Text
+  message   String   @db.Text
+  twitter   String?  @db.Text
+  link      String?  @db.Text
+  gif       String?  @db.Text
+  timestamp DateTime @default(now())
+
+  @@index([ca])
+}
